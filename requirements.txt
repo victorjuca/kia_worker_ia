@@ -1,0 +1,7 @@
+# kia-worker-ia
+# torch con CUDA NO va aqui: en Windows se instala antes (ver README); en Docker ya viene en la imagen base.
+psycopg[binary]>=3.2
+python-dotenv>=1.0
+audio-separator[gpu]>=0.30
+openai-whisper>=20240930
+pytest>=8
