@@ -2,8 +2,9 @@
 Remover voz con audio-separator como libreria: cada modelo se carga UNA vez en la GPU y se reutiliza.
 
 Igual que SegundaVoz.java: separa en kia_temp, normaliza el volumen del instrumental y al proyecto solo pasan las
-pistas finales. Los vocals solo se conservan si el proceso lo pidio (info_extra "vocals=1"); si no, antes de
-borrarlos se transcriben (callback 'antes_de_borrar_vocals').
+pistas finales. De la voz separada siempre se guarda su onda en texto (rv_vocals.onda, la "Voz guia" del Karaoke
+Studio); los vocals solo se conservan si el proceso lo pidio (info_extra "vocals=1"). Sin pedirlos, antes se
+transcriben (callback 'antes_de_borrar_vocals').
 """
 import json
 import logging
@@ -13,7 +14,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable
 
-from .. import rutas
+from .. import gpu, rutas
+from ..proyecto import onda
 
 log = logging.getLogger("remover_voz")
 
@@ -44,15 +46,35 @@ class RemoverVoz:
     def __init__(self, cfg):
         self.cfg = cfg
         self._separadores = {}
+        self.antes_de_cargar: Callable[[], None] | None = None   # libera Whisper (lo conecta main.py)
+
+    def libera(self, excepto: str | None = None):
+        """Saca de la GPU los modelos cargados (menos 'excepto')."""
+        quitar = [m for m in self._separadores if m != excepto]
+        for m in quitar:
+            del self._separadores[m]
+            log.info("Modelo %s liberado de la GPU", m)
+        if quitar:
+            gpu.vacia()
 
     def _separador(self, modelo: str, salida: Path):
+        if self.cfg.liberar_gpu:
+            self.libera(excepto=modelo)
+            if self.antes_de_cargar is not None:
+                self.antes_de_cargar()
         sep = self._separadores.get(modelo)
         if sep is None:
             from audio_separator.separator import Separator  # tarda: se importa al primer uso
 
             log.info("Cargando modelo %s ...", modelo)
+            opciones = {}
+            if self.cfg.separador_autocast:
+                opciones["use_autocast"] = True          # media precision en la GPU: mas rapido
+            if self.cfg.separador_overlap:
+                opciones["mdxc_params"] = {"segment_size": 256, "override_model_segment_size": False,
+                                           "batch_size": None, "overlap": self.cfg.separador_overlap, "pitch_shift": 0}
             sep = Separator(output_dir=str(salida), output_format="MP3",
-                            model_file_dir=str(self.cfg.modelos_dir / "audio-separator"))
+                            model_file_dir=str(self.cfg.modelos_dir / "audio-separator"), **opciones)
             sep.load_model(model_filename=modelo)
             self._separadores[modelo] = sep
             log.info("Modelo %s listo", modelo)
@@ -62,6 +84,20 @@ class RemoverVoz:
             if instancia is not None:
                 instancia.output_dir = str(salida)
         return sep
+
+    def _guarda_onda(self, vocals: Path, carpeta: Path):
+        """Voz guia del Karaoke Studio en texto (rv_vocals.onda): siempre la de rv_vocals.mp3; la de rv_sv_vocals.mp3
+        solo si aun no hay. Si falla no detiene el proceso."""
+        destino = carpeta / onda.ARCHIVO
+        if vocals.name.lower() != rutas.VOCALS and destino.is_file():
+            return
+        try:
+            tmp = vocals.with_name(onda.ARCHIVO)          # se arma en kia_temp y despues se coloca en el proyecto
+            onda.genera(vocals, tmp, self.cfg.ffmpeg)
+            rutas.coloca(tmp, destino)
+            log.info("Onda de la voz: %s", destino.name)
+        except Exception:
+            log.warning("No se pudo guardar la onda de la voz", exc_info=True)
 
     def _normaliza(self, instrumental: Path):
         """loudnorm + volumen, igual que SegundaVoz.modificarVolumen."""
@@ -97,6 +133,8 @@ class RemoverVoz:
                 for f in sorted(tmp.iterdir()):
                     if not f.is_file():
                         continue
+                    if rutas.es_vocals(f.name):
+                        self._guarda_onda(f, carpeta)
                     if not conservar_vocals and rutas.es_vocals(f.name):
                         if antes_de_borrar_vocals is not None:
                             antes_de_borrar_vocals(f)

@@ -4,7 +4,9 @@ import logging
 import uuid
 from pathlib import Path
 
-from .. import rutas
+from typing import Callable
+
+from .. import gpu, rutas
 
 log = logging.getLogger("whisper")
 
@@ -21,8 +23,17 @@ class Transcriptor:
     def __init__(self, cfg):
         self.cfg = cfg
         self._modelo = None
+        self.antes_de_cargar: Callable[[], None] | None = None   # libera los modelos de remover voz (main.py)
+
+    def libera(self):
+        if self._modelo is not None:
+            self._modelo = None
+            log.info("Whisper liberado de la GPU")
+            gpu.vacia()
 
     def _carga(self):
+        if self.cfg.liberar_gpu and self.antes_de_cargar is not None:
+            self.antes_de_cargar()
         if self._modelo is None:
             import whisper  # se importa aqui: tarda y necesita torch
 

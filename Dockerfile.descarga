@@ -1,0 +1,28 @@
+# Solo Descargar Cancion (tipo 10), sin GPU: corre en cualquier maquina.
+#   docker build -f Dockerfile.descarga -t kia-descarga .
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    DEBIAN_FRONTEND=noninteractive \
+    PATH_MAIN=/data/karaoke_ia \
+    KIA_TEMP=/data/kia_temp \
+    WORKER_TIPOS=10 \
+    YTDLP_JS_RUNTIME=deno \
+    FUENTE_PORTADA=/usr/share/fonts/truetype/kia/ariblk.ttf
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /worker
+COPY requirements-descarga.txt .
+RUN pip install --no-cache-dir -r requirements-descarga.txt \
+    && pip install --no-cache-dir deno
+
+COPY app ./app
+COPY recursos ./recursos
+
+# fuentes: monta la carpeta con ariblk.ttf (Arial Black) en /usr/share/fonts/truetype/kia
+VOLUME ["/data/karaoke_ia", "/data/kia_temp"]
+CMD ["python", "-m", "app.main"]

@@ -19,6 +19,8 @@ VOCALS_SV = "rv_sv_vocals.mp3"
 INSTRUMENTAL = "rv_instrumental.mp3"
 INSTRUMENTAL_SV = "rv_sv_instrumental.mp3"
 WHISPER_JSON = "rv_vocals.json"
+CIRCULO = "circulo.png"
+PORTADA = "portada.jpg"
 
 _KEY = re.compile(r"^[A-Z0-9]{5,8}$")
 
@@ -114,23 +116,39 @@ def song_ini_de_kfn(datos: bytes) -> str:
     raise ValueError("El .kfn no trae Song.ini")
 
 
-def letra_digitada(mp3: Path) -> bool:
-    """True si el proyecto ya tiene la letra digitada (primera marca Sync0 mayor que 0), como KFNDumper."""
+def resumen(ini: str) -> tuple[int, int]:
+    """(Sync0 en centesimas o -1, total de marcas de tiempo): lo que se guarda junto al Song.ini en la base
+    (ProyectoSongIni.resumen de kia)."""
+    inicio, marcas = -1, 0
+    for linea in (ini or "").splitlines():
+        t = linea.strip()
+        if not t.startswith("Sync") or "=" not in t:
+            continue
+        valores = t.split("=", 1)[1].split(",")
+        marcas += sum(1 for v in valores if v.strip())
+        if t.startswith("Sync0="):
+            try:
+                inicio = int(valores[0].strip())
+            except ValueError:
+                inicio = -1
+    return inicio, marcas
+
+
+def song_ini_archivo(mp3: Path) -> str | None:
+    """Song.ini del songini.txt / .kfn del proyecto si todavia existe el archivo (proyectos sin migrar)."""
     k = archivo_karaoke(mp3)
     if not k.is_file():
-        return False
+        return None
     try:
         if k.suffix.lower() == ".txt":
-            ini = k.read_text(encoding="utf-8-sig", errors="replace")
-        else:
-            ini = song_ini_de_kfn(k.read_bytes())
+            return k.read_text(encoding="utf-8-sig", errors="replace")
+        return song_ini_de_kfn(k.read_bytes())
     except Exception:
-        return False
-    for linea in ini.splitlines():
-        if linea.startswith("Sync0="):
-            primero = linea.split("=", 1)[1].split(",")[0].strip()
-            try:
-                return int(primero) > 0
-            except ValueError:
-                return False
-    return False
+        return None
+
+
+def letra_digitada(mp3: Path, ini: str | None = None) -> bool:
+    """True si el proyecto ya tiene la letra digitada (primera marca Sync0 mayor que 0), como KFNDumper.
+    'ini' es el Song.ini de la base; sin el, se busca el archivo del proyecto."""
+    texto = ini if ini is not None else song_ini_archivo(mp3)
+    return bool(texto) and resumen(texto)[0] > 0

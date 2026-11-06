@@ -12,13 +12,14 @@ import time
 
 from . import rutas
 from .config import Config
-from .fila import INFO_CONSERVAR_VOCALS, TIPO_REMOVER_VOZ, TIPO_TRANSCRIBIR, Fila, Proceso
+from .fila import ACCION_DESCARGA, INFO_CONSERVAR_VOCALS, TIPO_DESCARGAR, TIPO_REMOVER_VOZ, TIPO_TRANSCRIBIR, Fila, Proceso
+from .procesos.descargar import Descargador
 from .procesos.remover_voz import RemoverVoz
 from .procesos.transcribir import Transcriptor
 
 log = logging.getLogger("worker")
-TIPOS = (TIPO_REMOVER_VOZ, TIPO_TRANSCRIBIR)
-NOMBRES = {TIPO_REMOVER_VOZ: "Remover voz", TIPO_TRANSCRIBIR: "Transcribir"}
+TIPOS = (TIPO_REMOVER_VOZ, TIPO_TRANSCRIBIR, TIPO_DESCARGAR)
+NOMBRES = {TIPO_REMOVER_VOZ: "Remover voz", TIPO_TRANSCRIBIR: "Transcribir", TIPO_DESCARGAR: "Descargar canción"}
 
 
 class Worker:
@@ -27,7 +28,12 @@ class Worker:
         self.fila = Fila(cfg)
         self.removedor = RemoverVoz(cfg)
         self.transcriptor = Transcriptor(cfg)
+        self.descargador = Descargador(cfg, self.fila)
+        # en la GPU solo queda el modelo que se esta usando (LIBERAR_GPU)
+        self.removedor.antes_de_cargar = self.transcriptor.libera
+        self.transcriptor.antes_de_cargar = self.removedor.libera
         self.en_curso: Proceso | None = None
+        self._ultimo_aviso = ""
         self.detener = False
 
     # ------------------------------------------------------------------ procesos
@@ -38,13 +44,24 @@ class Worker:
             self.fila.guardar_letra_transcrita(p.cancion_id, texto)
         log.info("Transcripción lista (%d renglones)", len(texto.splitlines()))
 
+    def _letra_digitada(self, mp3) -> bool:
+        """El Song.ini esta en la base; si la cancion todavia no lo tiene ahi, se revisa el archivo del proyecto."""
+        ini = None
+        if rutas.es_key(mp3.parent.name):
+            try:
+                r = self.fila.songini(mp3.parent.name.upper())
+                ini = r[0] if r else None
+            except Exception:
+                log.warning("No se pudo leer el Song.ini de la base", exc_info=True)
+        return rutas.letra_digitada(mp3, ini)
+
     def remover_voz(self, p: Proceso):
         mp3 = rutas.resolver(p.path, self.cfg.path_main, self.cfg.path_main_alias)
         conservar = INFO_CONSERVAR_VOCALS in self.fila.info_extra(p.id)
-        whisper = self.fila.parametro_activo("transcribir_whisper") and not rutas.letra_digitada(mp3)
+        whisper = self.fila.parametro_activo("transcribir_whisper") and not self._letra_digitada(mp3)
 
         def antes_de_borrar(vocals):
-            # sin conservar los vocals: Whisper los usa (trabaja mejor con la voz aislada) y despues se borran
+            # sin conservar los vocals: Whisper los usa (trabaja mejor con la voz aislada) y despues se borran (queda rv_vocals.onda)
             if whisper and vocals.name.lower() == rutas.VOCALS:
                 self._transcribe_y_guarda(vocals, mp3, p)
 
@@ -60,38 +77,72 @@ class Worker:
             raise FileNotFoundError(f"No existe {rutas.VOCALS} (manda la canción a Remover voz con Vocals marcado)")
         self._transcribe_y_guarda(vocals, mp3, p)
 
+    def descargar(self, p: Proceso):
+        """Descarga y completa el proyecto; al terminar, si la cancion lo pidio, encola Remover voz (como kia)."""
+        mp3, datos = self.descargador.ejecutar(p)
+        self.fila.terminar(p.path, p.tipo)
+        self.fila.accion_sistema(ACCION_DESCARGA, mp3.name)
+        if self.fila.pidio_remover_voz(datos.id):
+            r = self.fila.encolar(TIPO_REMOVER_VOZ, p.path, datos.id, datos.key, "")
+            log.info("Remover voz encolado: %s", r)
+
     # ------------------------------------------------------------------ fila
     def una_vuelta(self) -> bool:
         """Toma y ejecuta un proceso. True si trabajo en algo."""
         procesadora, motivo = self.fila.es_procesadora()
         if not procesadora:
-            log.debug("Esta máquina no procesa: %s", motivo)
+            self._avisa(f"Esta máquina no procesa: {motivo}")
             return False
-        for p in self.fila.pendientes(TIPOS):
-            ok, motivo = self.fila.iniciar(p.id)
-            if not ok:
-                log.debug("Proceso %s no asignado: %s", p.id, motivo)
-                continue
-            self.en_curso = p
-            inicio = time.monotonic()
-            log.info("== %s #%s: %s", NOMBRES[p.tipo], p.id, p.path)
-            try:
-                if p.tipo == TIPO_REMOVER_VOZ:
-                    self.remover_voz(p)
-                else:
-                    self.transcribir(p)
-                self.fila.terminar(p.path, p.tipo)
-                log.info("== Terminado #%s en %.0f s", p.id, time.monotonic() - inicio)
-            except Exception as e:
-                log.exception("Error en el proceso #%s", p.id)
-                self.fila.error(p.id, f"Error en {NOMBRES[p.tipo]} (worker IA): {e}")
-            finally:
-                self.en_curso = None
-            return True   # un proceso a la vez
-        return False
+        pendientes = self.fila.pendientes(self.cfg.tipos)
+        if not pendientes:
+            self._avisa("Sin procesos pendientes de " + " / ".join(NOMBRES.get(t, str(t)) for t in self.cfg.tipos))
+            return False
+        # un proceso a la vez entre todos los servicios de esta maquina (kia-render usa el mismo candado)
+        candado = self.cfg.un_proceso_por_maquina
+        if candado and not self.fila.toma_candado():
+            self._avisa("Hay procesos pendientes, pero otro servicio de esta máquina tiene el candado "
+                        "(un proceso a la vez); se espera")
+            return False
+        try:
+            for p in pendientes:
+                ok, motivo = self.fila.iniciar(p.id)
+                if not ok:
+                    self._avisa(f"Hay procesos pendientes pero no se asignan a esta máquina: {motivo}")
+                    continue
+                self.en_curso = p
+                self._ultimo_aviso = ""
+                inicio = time.monotonic()
+                log.info("== %s #%s: %s", NOMBRES[p.tipo], p.id, p.path)
+                try:
+                    if p.tipo == TIPO_DESCARGAR:
+                        self.descargar(p)          # termina el proceso antes de encolar Remover voz
+                    else:
+                        if p.tipo == TIPO_REMOVER_VOZ:
+                            self.remover_voz(p)
+                        else:
+                            self.transcribir(p)
+                        self.fila.terminar(p.path, p.tipo)
+                    log.info("== Terminado #%s en %.0f s", p.id, time.monotonic() - inicio)
+                except Exception as e:
+                    log.exception("Error en el proceso #%s", p.id)
+                    self.fila.error(p.id, f"Error en {NOMBRES[p.tipo]} (worker IA): {e}")
+                finally:
+                    self.en_curso = None
+                return True   # un proceso a la vez
+            return False
+        finally:
+            if candado:
+                self.fila.suelta_candado()
+
+    def _avisa(self, mensaje: str):
+        """Dice una vez por que no se toman procesos (se repite solo si el motivo cambia)."""
+        if mensaje != self._ultimo_aviso:
+            log.warning(mensaje)
+            self._ultimo_aviso = mensaje
 
     def corre(self):
-        log.info("Worker IA iniciado. Máquina: %s | Proyectos: %s | Temporales: %s",
+        log.info("Worker iniciado (%s). Máquina: %s | Proyectos: %s | Temporales: %s",
+                 ", ".join(NOMBRES.get(t, str(t)) for t in self.cfg.tipos),
                  self.cfg.maquina_id, self.cfg.path_main, self.cfg.kia_temp)
         while not self.detener:
             try:

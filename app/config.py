@@ -29,6 +29,13 @@ def _id_maquina_windows() -> str:
         return ""
 
 
+def _fuente_por_defecto() -> str:
+    """Arial Black: la de Windows o, en Docker, la que se monte en /usr/share/fonts/truetype/kia."""
+    if platform.system() == "Windows":
+        return os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "ariblk.ttf")
+    return "/usr/share/fonts/truetype/kia/ariblk.ttf"
+
+
 @dataclass
 class Config:
     # base de datos (la misma de kia)
@@ -57,9 +64,27 @@ class Config:
     whisper_modelo: str = field(default_factory=lambda: os.getenv("WHISPER_MODELO", "large-v3-turbo"))
     whisper_idioma: str = field(default_factory=lambda: os.getenv("WHISPER_IDIOMA", "es"))
     whisper_device: str = field(default_factory=lambda: os.getenv("WHISPER_DEVICE", "cuda"))
+    # audio-separator: autocast (media precision, mas rapido) y overlap de los modelos roformer (vacio = el del modelo)
+    separador_autocast: bool = field(default_factory=lambda: os.getenv("SEPARADOR_AUTOCAST", "false").strip().lower() in ("1", "true", "si", "sí"))
+    separador_overlap: int | None = field(default_factory=lambda: int(os.getenv("SEPARADOR_OVERLAP")) if os.getenv("SEPARADOR_OVERLAP", "").strip() else None)
+    # true: solo un modelo a la vez en la GPU (tarjetas de 8 GB); false: los deja cargados (GPU de 16 GB o mas)
+    liberar_gpu: bool = field(default_factory=lambda: os.getenv("LIBERAR_GPU", "true").strip().lower() in ("1", "true", "si", "sí"))
 
     ffmpeg: str = field(default_factory=lambda: os.getenv("FFMPEG", "ffmpeg"))
+
+    # Descargar Cancion (yt-dlp) y caratula
+    recursos_dir: Path = field(default_factory=lambda: Path(os.getenv("RECURSOS_DIR", str(Path(__file__).resolve().parent.parent / "recursos"))))
+    fuente_portada: Path = field(default_factory=lambda: Path(os.getenv("FUENTE_PORTADA", _fuente_por_defecto())))
+    portada_auto: bool = field(default_factory=lambda: os.getenv("PORTADA_AUTO", "true").strip().lower() in ("1", "true", "si", "sí"))
+    ytdlp_js_runtime: str = field(default_factory=lambda: os.getenv("YTDLP_JS_RUNTIME", "node"))
+    ytdlp_cookies: str = field(default_factory=lambda: os.getenv("YTDLP_COOKIES", ""))
+    ytdlp_actualizar: bool = field(default_factory=lambda: os.getenv("YTDLP_ACTUALIZAR", "true").strip().lower() in ("1", "true", "si", "sí"))
     intervalo_seg: int = field(default_factory=lambda: int(os.getenv("INTERVALO_SEG", "10")))
+    # que procesos toma este contenedor: 10 Descargar, 1 Remover voz, 5 Transcribir (separados por coma)
+    tipos: tuple[int, ...] = field(default_factory=lambda: tuple(
+        int(t) for t in os.getenv("WORKER_TIPOS", "1,5,10").replace(" ", "").split(",") if t))
+    # candado en la base: un solo proceso a la vez en esta maquina entre el worker IA y kia-render
+    un_proceso_por_maquina: bool = field(default_factory=lambda: os.getenv("UN_PROCESO_POR_MAQUINA", "true").strip().lower() in ("1", "true", "si", "sí"))
 
     def __post_init__(self):
         if not self.maquina_id and platform.system() == "Windows":

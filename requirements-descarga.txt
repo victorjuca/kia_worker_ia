@@ -1,0 +1,7 @@
+# Solo Descargar Cancion (sin GPU): contenedor kia-descarga
+psycopg[binary]>=3.2
+python-dotenv>=1.0
+yt-dlp[default]>=2026.10
+pytubefix>=8.0
+Pillow>=10.4
+numpy>=1.26

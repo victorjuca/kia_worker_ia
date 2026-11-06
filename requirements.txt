@@ -1,7 +1,12 @@
 # kia-worker-ia
-# torch con CUDA NO va aqui: en Windows se instala antes (ver README); en Docker ya viene en la imagen base.
+# torch con CUDA NO va aqui: se instala DESPUES de este archivo (ver README); en Docker lo hace el Dockerfile.
 psycopg[binary]>=3.2
 python-dotenv>=1.0
 audio-separator[gpu]>=0.30
 openai-whisper>=20240930
+# Descargar Cancion: yt-dlp (con su solucionador de JavaScript), caratula y receta de audio
+yt-dlp[default]>=2026.10
+pytubefix>=8.0
+Pillow>=10.4
+numpy>=1.26
 pytest>=8
