@@ -175,6 +175,20 @@ def main():
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), stream=sys.stdout,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     cfg = Config()
+    # Si WORKER_MAQUINA_ID no viene del .env se intenta auto-detectar (Windows).
+    # En Mac/Linux hay que setearlo, pero si ya viene configurado y la maquina no
+    # existe en la DB, la registramos automaticamente para no tener que hacerlo a mano.
+    if cfg.maquina_id:
+        try:
+            from .fila import Fila as _FilaTmp
+            _fila_tmp = _FilaTmp(cfg)
+            if _fila_tmp.registrar_si_nueva():
+                log.info("Maquina registrada automaticamente en la DB: %s", cfg.maquina_id)
+            else:
+                log.debug("Maquina ya registrada: %s", cfg.maquina_id)
+            _fila_tmp.cierra()
+        except Exception as _e:
+            log.warning("No se pudo verificar/registrar la maquina en la DB: %s", _e)
     faltan = cfg.valida()
     if faltan:
         log.error("Falta configurar: %s (revisa el archivo .env)", ", ".join(faltan))

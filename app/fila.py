@@ -4,6 +4,8 @@ sps_procesadora, valida_entrega_procesos, iniciar_proceso_v2, spu_termino_proces
 """
 import base64
 import logging
+import platform
+import socket
 from dataclasses import dataclass
 
 import psycopg
@@ -71,6 +73,26 @@ class Fila:
             self._cn.close()
 
     # ------------------------------------------------------------------ fila
+    def registrar_si_nueva(self) -> bool:
+        """Si esta maquina (maquina_id) no existe en la tabla maquina, la inserta automaticamente.
+        Devuelve True si la registro ahora, False si ya existia."""
+        r = self._ejecuta(
+            "SELECT id FROM maquina WHERE mac = %s",
+            (self.cfg.maquina_id,)
+        )
+        if r:
+            return False  # ya estaba registrada
+        nombre_pc = socket.gethostname()
+        nombre_usuario = os.environ.get("USER") or os.environ.get("USERNAME") or "worker"
+        sistema = platform.system()   # 'Darwin', 'Linux', 'Windows'
+        sobrenombre = f"{nombre_pc} ({sistema})"
+        self._ejecuta(
+            """INSERT INTO maquina (mac, nombre_pc, nombre_usuario, is_procesador, sobrenombre, usuario_id)
+               VALUES (%s, %s, %s, true, %s, 1)""",
+            (self.cfg.maquina_id, nombre_pc, nombre_usuario, sobrenombre)
+        )
+        return True
+
     def es_procesadora(self) -> tuple[bool, str]:
         r = self._ejecuta("select * from sps_procesadora(%s)", (self.cfg.maquina_id,))
         arr = r[0] if r else None
