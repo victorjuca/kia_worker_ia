@@ -74,7 +74,8 @@ class Fila:
 
     # ------------------------------------------------------------------ fila
     def registrar_si_nueva(self) -> bool:
-        """Si esta maquina (maquina_id) no existe en la tabla maquina, la inserta automaticamente.
+        """Si esta maquina (maquina_id) no existe en la tabla maquina, la inserta automaticamente
+        y vincula los tipos de proceso que maneja segun WORKER_TIPOS del .env.
         Devuelve True si la registro ahora, False si ya existia."""
         r = self._ejecuta(
             "SELECT id FROM maquina WHERE mac = %s",
@@ -86,11 +87,22 @@ class Fila:
         nombre_usuario = os.environ.get("USER") or os.environ.get("USERNAME") or "worker"
         sistema = platform.system()   # 'Darwin', 'Linux', 'Windows'
         sobrenombre = f"{nombre_pc} ({sistema})"
-        self._ejecuta(
+        # insertar maquina y obtener su id
+        row = self._ejecuta(
             """INSERT INTO maquina (mac, nombre_pc, nombre_usuario, is_procesador, sobrenombre, usuario_id)
-               VALUES (%s, %s, %s, true, %s, 1)""",
+               VALUES (%s, %s, %s, true, %s, 1) RETURNING id""",
             (self.cfg.maquina_id, nombre_pc, nombre_usuario, sobrenombre)
         )
+        maquina_id_db = row[0] if row else None
+        # vincular tipos de proceso (los que esten en WORKER_TIPOS)
+        if maquina_id_db:
+            for tipo in self.cfg.tipos:
+                self._ejecuta(
+                    """INSERT INTO maquina_proceso (maquina, tipoproceso, procesa, numejecuta)
+                       VALUES (%s, %s, true, 1)
+                       ON CONFLICT DO NOTHING""",
+                    (maquina_id_db, tipo)
+                )
         return True
 
     def es_procesadora(self) -> tuple[bool, str]:
